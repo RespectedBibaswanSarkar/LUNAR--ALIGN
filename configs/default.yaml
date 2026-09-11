@@ -1,0 +1,22 @@
+matching:
+  min_matches: 50
+  min_inlier_ratio: 0.30
+  min_spatial_coverage: 0.20
+
+grid:
+  rows: 8
+  cols: 8
+  max_matches_per_cell: 20
+
+refinement:
+  enable_subpixel: true
+  upsample_factor: 10
+
+policy:
+  mode: rule_based
+
+dqn:
+  enabled: false
+
+runtime:
+  device: auto
