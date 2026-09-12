@@ -502,3 +502,6 @@ python -m pip install numpy pillow opencv-python-headless scipy pyyaml pandas ma
 python scripts/run_registration.py --reference your_ref.png --target your_target.png --output-dir outputs/demo
 streamlit run dashboard.py
 ```
+## Contributors
+
+- Nomee Singh
