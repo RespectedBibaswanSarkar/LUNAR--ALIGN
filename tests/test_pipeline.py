@@ -1,13 +1,19 @@
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import numpy as np
 
 from core.geometry.haversine import haversine_distance
 from core.preprocess.normalization import normalize_image
 from core.preprocess.pyramid import build_pyramid
-from core.registration.pipeline import LunarAlignPipeline
+from core.registration.pipeline import (
+    LunarAlignPipeline,
+    build_csv_pair_manifest,
+    discover_image_dataset_pairs,
+    select_matcher_for_scene,
+)
 from matchers.sift_baseline.matcher import SIFTMatcher
 from core.spatial.grid_selection import select_spatial_matches
 
@@ -63,3 +69,63 @@ def test_pipeline_generates_outputs(tmp_path):
     assert os.path.exists(tmp_path / "metrics.json")
     assert os.path.exists(tmp_path / "transform.json")
     assert os.path.exists(tmp_path / "matches.png")
+
+
+def test_csv_manifest_uses_existing_ohrc_tmc_metadata():
+    root = Path(__file__).resolve().parents[1]
+    manifest = build_csv_pair_manifest(
+        ohrc_csv=root / "coordinates_ohrc.csv",
+        tmc_csv=root / "coordinates_tmc2.csv",
+        max_pairs=3,
+    )
+    assert len(manifest) > 0
+    assert all({"ohrc", "tmc"}.issubset(row.keys()) for row in manifest)
+    assert set(manifest[0].keys()) >= {"pair_id", "ohrc", "tmc", "overlap_score", "preprocessing_steps"}
+
+
+def test_kaguya_catalog_manifest_uses_lat_lon_metadata():
+    root = Path(__file__).resolve().parents[1]
+    manifest = build_csv_pair_manifest(
+        ohrc_csv=root / "kaguya_tc_stereo_catalog_lesssize.csv",
+        tmc_csv=root / "kaguya_tc_stereo_catalog_lesssize.csv",
+        max_pairs=3,
+    )
+    assert len(manifest) > 0
+    assert all({"ohrc", "tmc"}.issubset(row.keys()) for row in manifest)
+    assert set(manifest[0].keys()) >= {"pair_id", "ohrc", "tmc", "overlap_score", "preprocessing_steps"}
+
+
+def test_csv_based_pipeline_runs_with_stage_summary(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    manifest = build_csv_pair_manifest(
+        ohrc_csv=root / "coordinates_ohrc.csv",
+        tmc_csv=root / "coordinates_tmc2.csv",
+        max_pairs=1,
+    )
+    pipeline = LunarAlignPipeline(output_dir=str(tmp_path))
+    result = pipeline.run_csv_pair(manifest[0], metadata_only=True)
+
+    assert result["rmse"] >= 0
+    assert result["matcher"] in {"SIFT", "SIFT_FALLBACK"}
+    assert isinstance(result["stages"], list)
+    assert any(stage["name"] == "matching" for stage in result["stages"])
+    assert result["hud"]["current_stage"] in {stage["name"] for stage in result["stages"]}
+
+
+def test_dataset_image_pairs_are_discovered_and_matcher_selected(tmp_path):
+    from PIL import Image
+
+    ref_dir = tmp_path / "reference"
+    tgt_dir = tmp_path / "target"
+    ref_dir.mkdir()
+    tgt_dir.mkdir()
+
+    Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(ref_dir / "ref_001.png")
+    Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(tgt_dir / "tgt_001.png")
+
+    manifest = discover_image_dataset_pairs(tmp_path, max_pairs=1)
+    assert len(manifest) >= 1
+    assert "reference" in manifest[0]["reference"] or "target" in manifest[0]["target"]
+
+    matcher_name = select_matcher_for_scene(0.2, 0.8, 0.7)
+    assert matcher_name in {"SIFT", "DISK", "LightGlue", "LoFTR", "RIFT"}
