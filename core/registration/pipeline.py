@@ -17,6 +17,7 @@ from matchers.sift_baseline.matcher import SIFTMatcher
 from matchers.lightglue.matcher import LightGlueMatcher
 from matchers.disk.matcher import DISKMatcher
 from matchers.loftr.matcher import LoFTRMatcher
+from matchers.rift.matcher import RIFTMatcher
 
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".npy", ".npz"}
 MODEL_POOL = ["LightGlue", "DISK", "LoFTR", "RIFT", "SIFT"]
@@ -190,15 +191,29 @@ def select_matcher_for_scene(illumination_gap, texture_strength, overlap_confide
 
 
 def resolve_available_matcher(match_name):
-    model = MODEL_REGISTRY.get(match_name, MODEL_REGISTRY["SIFT"])
-    driver = model["driver"]
+    local_matchers = {
+        "LightGlue": "matchers.lightglue.matcher",
+        "DISK": "matchers.disk.matcher",
+        "LoFTR": "matchers.loftr.matcher",
+        "RIFT": "matchers.rift.matcher",
+        "SIFT": "matchers.sift.matcher",
+    }
+
+    module_name = local_matchers.get(match_name)
+
+    if module_name is None:
+        return "SIFT", True
+
     try:
         import importlib.util
-        spec = importlib.util.find_spec(driver.split(".")[0])
+        spec = importlib.util.find_spec(module_name)
+
         if spec is not None:
             return match_name, True
+
     except Exception:
         pass
+
     return "SIFT", True
 
 
@@ -357,6 +372,8 @@ class LunarAlignPipeline:
          matcher = DISKMatcher()
         elif matcher_name == "LoFTR":
          matcher = LoFTRMatcher()
+        elif matcher_name == "RIFT":
+         matcher = RIFTMatcher() 
         else:
          matcher = SIFTMatcher()
 

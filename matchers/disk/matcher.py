@@ -35,12 +35,18 @@ class DISKMatcher:
         tensor1 = self._to_tensor(image1).to(self.device)
         tensor2 = self._to_tensor(image2).to(self.device)
 
-        # Resize large lunar images to keep CPU memory usage reasonable.
+        original_h1, original_w1 = tensor1.shape[-2:]
+        original_h2, original_w2 = tensor2.shape[-2:]
+
+        resized_h, resized_w = 1168, 1024
+
         tensor1 = torch.nn.functional.interpolate(
-            tensor1, size=(1168, 1024), mode="bilinear", align_corners=False
+            tensor1, size=(resized_h, resized_w),
+            mode="bilinear", align_corners=False
         )
         tensor2 = torch.nn.functional.interpolate(
-            tensor2, size=(1168, 1024), mode="bilinear", align_corners=False
+            tensor2, size=(resized_h, resized_w),
+            mode="bilinear", align_corners=False
         )
 
         features1 = self.model(tensor1, n=self.max_num_keypoints)[0]
@@ -56,21 +62,23 @@ class DISKMatcher:
 
         points1 = (
             features1.keypoints[indices[:, 0]]
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(np.float32)
+            .detach().cpu().numpy().astype(np.float32)
         )
-
         points2 = (
             features2.keypoints[indices[:, 1]]
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(np.float32)
+            .detach().cpu().numpy().astype(np.float32)
         )
 
-        confidence = float(indices.shape[0] / max(features1.keypoints.shape[0], 1))
+        # Convert DISK's resized coordinates back to original-image coordinates.
+        points1[:, 0] *= original_w1 / resized_w
+        points1[:, 1] *= original_h1 / resized_h
+
+        points2[:, 0] *= original_w2 / resized_w
+        points2[:, 1] *= original_h2 / resized_h
+
+        confidence = float(
+            indices.shape[0] / max(features1.keypoints.shape[0], 1)
+        )
 
         return {
             "points1": points1,

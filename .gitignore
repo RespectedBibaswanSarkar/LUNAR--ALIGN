@@ -8,3 +8,6 @@ outputs/
 
 data/test_kaguya.img.gz
 data/test_kaguya.npz
+
+data/test_kaguya_tc2.img.gz
+data/test_kaguya_tc2.npz

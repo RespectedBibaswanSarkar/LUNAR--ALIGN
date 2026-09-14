@@ -27,20 +27,26 @@ class LoFTRMatcher:
 
         return torch.from_numpy(image).float()[None, None]
 
+
     def match(self, image1, image2):
         tensor1 = self._to_tensor(image1).to(self.device)
         tensor2 = self._to_tensor(image2).to(self.device)
 
+        original_h1, original_w1 = tensor1.shape[-2:]
+        original_h2, original_w2 = tensor2.shape[-2:]
+
+        resized_h, resized_w = 584, 512
+
         tensor1 = torch.nn.functional.interpolate(
             tensor1,
-            size=(584, 512),
+            size=(resized_h, resized_w),
             mode="bilinear",
             align_corners=False,
         )
 
         tensor2 = torch.nn.functional.interpolate(
             tensor2,
-            size=(584, 512),
+            size=(resized_h, resized_w),
             mode="bilinear",
             align_corners=False,
         )
@@ -70,6 +76,13 @@ class LoFTRMatcher:
 
         if len(points1) < 2:
             raise ValueError("LoFTR failed to produce enough matches.")
+
+        # Convert LoFTR's resized coordinates back to original-image coordinates.
+        points1[:, 0] *= original_w1 / resized_w
+        points1[:, 1] *= original_h1 / resized_h
+
+        points2[:, 0] *= original_w2 / resized_w
+        points2[:, 1] *= original_h2 / resized_h
 
         confidence = float(len(points1))
 
