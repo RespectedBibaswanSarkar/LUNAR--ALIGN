@@ -15,6 +15,8 @@ from core.preprocess.kaguya_loader import load_kaguya_img_gz
 from core.spatial.grid_selection import select_spatial_matches
 from matchers.sift_baseline.matcher import SIFTMatcher
 from matchers.lightglue.matcher import LightGlueMatcher
+from matchers.disk.matcher import DISKMatcher
+from matchers.loftr.matcher import LoFTRMatcher
 
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".npy", ".npz"}
 MODEL_POOL = ["LightGlue", "DISK", "LoFTR", "RIFT", "SIFT"]
@@ -350,9 +352,13 @@ class LunarAlignPipeline:
     @staticmethod
     def _run_matcher(reference_image, target_image, matcher_name):
         if matcher_name == "LightGlue":
-            matcher = LightGlueMatcher()
+         matcher = LightGlueMatcher()
+        elif matcher_name == "DISK":
+         matcher = DISKMatcher()
+        elif matcher_name == "LoFTR":
+         matcher = LoFTRMatcher()
         else:
-            matcher = SIFTMatcher()
+         matcher = SIFTMatcher()
 
         match = matcher.match(reference_image, target_image)
 
@@ -496,10 +502,12 @@ class LunarAlignPipeline:
             )
 
             return self.run(
-                reference_image,
-                target_image,
-                pair_metadata=pair,
-            )
+             reference_image,
+             target_image,
+             pair_metadata=pair,
+
+
+)
 
         # Legacy CSV workflow
             ohrc_name = str(pair.get("ohrc", "reference"))
