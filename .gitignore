@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 outputs/
 *.log
+
+data/test_kaguya.img.gz
+data/test_kaguya.npz

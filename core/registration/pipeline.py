@@ -1,3 +1,4 @@
+import cv2
 import json
 import os
 import time
@@ -10,8 +11,10 @@ from PIL import Image
 from core.geometry.haversine import haversine_distance
 from core.preprocess.normalization import normalize_image
 from core.preprocess.pyramid import build_pyramid
+from core.preprocess.kaguya_loader import load_kaguya_img_gz
 from core.spatial.grid_selection import select_spatial_matches
 from matchers.sift_baseline.matcher import SIFTMatcher
+from matchers.lightglue.matcher import LightGlueMatcher
 
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".npy", ".npz"}
 MODEL_POOL = ["LightGlue", "DISK", "LoFTR", "RIFT", "SIFT"]
@@ -66,14 +69,33 @@ def _numeric_center(row):
 
 def _dataset_rows(frame):
     rows = []
+
     for _, row in frame.iterrows():
         name = _candidate_name(row)
+
         if not name:
             continue
-        center_lat, center_lon = _numeric_center(row)
-        rows.append({"name": name, "center_lat": center_lat, "center_lon": center_lon})
-    return rows
 
+        center_lat, center_lon = _numeric_center(row)
+
+        rows.append({
+            "name": name,
+            "center_lat": center_lat,
+            "center_lon": center_lon,
+            "pair_id": str(row.get("pair_id", "")),
+            "sensor": str(row.get("sensor", "")),
+            "image_id": str(row.get("image_id", "")),
+            "image_filename": str(row.get("image_filename", "")),
+            "image_url": str(row.get("image_url", "")),
+            "lines": _coerce_float(row.get("lines")),
+            "line_samples": _coerce_float(row.get("line_samples")),
+            "sample_bits": _coerce_float(row.get("sample_bits")),
+            "sample_type": str(row.get("sample_type", "")),
+            "scaling_factor": _coerce_float(row.get("scaling_factor")),
+            "offset": _coerce_float(row.get("offset")),
+        })
+
+    return rows
 
 def _resolve_image_array(path_or_array):
     if isinstance(path_or_array, (str, os.PathLike)):
@@ -179,13 +201,63 @@ def resolve_available_matcher(match_name):
 
 
 def build_csv_pair_manifest(ohrc_csv, tmc_csv, max_pairs=None):
-    ohrc_df = pd.read_csv(ohrc_csv)
-    tmc_df = pd.read_csv(tmc_csv)
+    reference_df = pd.read_csv(ohrc_csv)
 
-    if ohrc_df.empty or tmc_df.empty:
+    if reference_df.empty:
         return []
 
-    ohrc_rows = _dataset_rows(ohrc_df)
+    # Kaguya catalog: TC1 and TC2 rows already contain their pair_id.
+    if {"pair_id", "sensor", "image_url"}.issubset(reference_df.columns):
+        manifest = []
+
+        for pair_id, group in reference_df.groupby("pair_id"):
+            tc1_rows = group[group["sensor"].astype(str).str.upper() == "TC1"]
+            tc2_rows = group[group["sensor"].astype(str).str.upper() == "TC2"]
+
+            if tc1_rows.empty or tc2_rows.empty:
+                continue
+
+            tc1 = _dataset_rows(tc1_rows)[0]
+            tc2 = _dataset_rows(tc2_rows)[0]
+
+            manifest.append({
+                "pair_id": str(pair_id),
+                "reference": tc1,
+                "target": tc2,
+                "overlap_score": 1.0,
+                "preprocessing_steps": [
+                    "metadata_extraction",
+                    "normalization",
+                    "pyramid_build",
+                    "feature_matching",
+                    "grid_spatial_filter",
+                ],
+                "metadata": {
+                    "reference_sensor": tc1["sensor"],
+                    "target_sensor": tc2["sensor"],
+                    "reference_center": (
+                        tc1["center_lat"],
+                        tc1["center_lon"],
+                    ),
+                    "target_center": (
+                        tc2["center_lat"],
+                        tc2["center_lon"],
+                    ),
+                },
+            })
+
+            if max_pairs is not None and len(manifest) >= max_pairs:
+                break
+
+        return manifest
+
+    # Legacy OHRC/TMC CSV workflow.
+    tmc_df = pd.read_csv(tmc_csv)
+
+    if tmc_df.empty:
+        return []
+
+    ohrc_rows = _dataset_rows(reference_df)
     tmc_rows = _dataset_rows(tmc_df)
 
     if not ohrc_rows or not tmc_rows:
@@ -193,22 +265,39 @@ def build_csv_pair_manifest(ohrc_csv, tmc_csv, max_pairs=None):
 
     same_source = str(Path(ohrc_csv).resolve()) == str(Path(tmc_csv).resolve())
     manifest = []
+
     for i, ohrc in enumerate(ohrc_rows):
-        candidates = []
-        for tmc in tmc_rows:
-            if same_source and tmc["name"] == ohrc["name"]:
-                continue
-            candidates.append(tmc)
+        candidates = [
+            tmc for tmc in tmc_rows
+            if not (same_source and tmc["name"] == ohrc["name"])
+        ]
+
         if not candidates:
             continue
 
         best_match = min(
             candidates,
-            key=lambda tmc: haversine_distance(ohrc["center_lat"], ohrc["center_lon"], tmc["center_lat"], tmc["center_lon"]),
+            key=lambda tmc: haversine_distance(
+                ohrc["center_lat"],
+                ohrc["center_lon"],
+                tmc["center_lat"],
+                tmc["center_lon"],
+            ),
         )
-        best_distance = haversine_distance(ohrc["center_lat"], ohrc["center_lon"], best_match["center_lat"], best_match["center_lon"])
-        overlap_score = max(0.0, min(1.0, 1.0 - (best_distance / 1000.0)))
-        pair = {
+
+        best_distance = haversine_distance(
+            ohrc["center_lat"],
+            ohrc["center_lon"],
+            best_match["center_lat"],
+            best_match["center_lon"],
+        )
+
+        overlap_score = max(
+            0.0,
+            min(1.0, 1.0 - (best_distance / 1000.0)),
+        )
+
+        manifest.append({
             "pair_id": f"pair_{i:03d}",
             "ohrc": ohrc["name"],
             "tmc": best_match["name"],
@@ -221,11 +310,21 @@ def build_csv_pair_manifest(ohrc_csv, tmc_csv, max_pairs=None):
                 "feature_matching",
                 "grid_spatial_filter",
             ],
-            "metadata": {"ohrc_center": (ohrc["center_lat"], ohrc["center_lon"]), "tmc_center": (best_match["center_lat"], best_match["center_lon"])},
-        }
-        manifest.append(pair)
+            "metadata": {
+                "ohrc_center": (
+                    ohrc["center_lat"],
+                    ohrc["center_lon"],
+                ),
+                "tmc_center": (
+                    best_match["center_lat"],
+                    best_match["center_lon"],
+                ),
+            },
+        })
+
         if max_pairs is not None and len(manifest) >= max_pairs:
             break
+
     return manifest
 
 
@@ -236,9 +335,44 @@ class LunarAlignPipeline:
 
     @staticmethod
     def _load_pair_images(reference_image, target_image):
-        reference_array = _resolve_image_array(reference_image)
-        target_array = _resolve_image_array(target_image)
-        return reference_array, target_array
+        def load_one(image):
+            if isinstance(image, np.ndarray):
+                return image
+
+            path = Path(image)
+
+            if path.suffix.lower() in {".npy", ".npz"}:
+                return _load_image(path)
+
+                return _load_image(path)
+
+        return load_one(reference_image), load_one(target_image)
+    @staticmethod
+    def _run_matcher(reference_image, target_image, matcher_name):
+        if matcher_name == "LightGlue":
+            matcher = LightGlueMatcher()
+        else:
+            matcher = SIFTMatcher()
+
+        match = matcher.match(reference_image, target_image)
+
+        match_name = str(
+            match.get("metadata", {}).get(
+                "matcher",
+                matcher_name or "SIFT",
+            )
+        )
+
+        if matcher_name and match_name not in {
+            matcher_name,
+            "SIFT",
+            "SIFT_FALLBACK",
+        }:
+            match_name = matcher_name
+
+        match.setdefault("metadata", {})["matcher"] = match_name
+
+        return match, match_name
 
     def prepare(self, reference_image, target_image):
         ref_norm, ref_mask = normalize_image(reference_image)
@@ -280,15 +414,6 @@ class LunarAlignPipeline:
             },
         }
 
-    @staticmethod
-    def _run_matcher(reference_image, target_image, matcher_name):
-        matcher = SIFTMatcher()
-        match = matcher.match(reference_image, target_image)
-        match_name = str(match.get("metadata", {}).get("matcher", matcher_name or "SIFT"))
-        if matcher_name and match_name not in {matcher_name, "SIFT", "SIFT_FALLBACK"}:
-            match_name = matcher_name
-        match.setdefault("metadata", {})["matcher"] = match_name
-        return match, match_name
 
     @staticmethod
     def _generate_csv_pair_image(pair_id, ohrc_name, tmc_name, overlap_score):
@@ -319,16 +444,79 @@ class LunarAlignPipeline:
         target = np.clip(target, 0, 255).astype(np.uint8)
         return reference, target
 
+    def _download_kaguya_image(self, row):
+        import urllib.request
+
+        cache_dir = self.output_dir / "kaguya_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = str(row["image_filename"])
+        local_path = cache_dir / filename
+
+        if not local_path.exists():
+         print(f"Downloading Kaguya image: {filename}")
+        urllib.request.urlretrieve(
+            str(row["image_url"]),
+            local_path,
+        )
+
+        return local_path
+
     def run_csv_pair(self, pair, metadata_only=False):
-        pair_id = str(pair.get("pair_id", "pair_000"))
-        ohrc_name = str(pair.get("ohrc", "reference"))
-        tmc_name = str(pair.get("tmc", "target"))
-        overlap_score = float(pair.get("overlap_score", 0.5))
-        reference_image, target_image = self._generate_csv_pair_image(pair_id, ohrc_name, tmc_name, overlap_score)
-        if metadata_only:
-            result = self.run(reference_image, target_image, pair_metadata=pair)
-            return result
-        return self.run(reference_image, target_image, pair_metadata=pair)
+       pair_id = str(pair.get("pair_id", "pair_000"))
+       
+       overlap_score = float(pair.get("overlap_score", 0.5))
+
+       reference = pair.get("reference")
+       target = pair.get("target")
+
+        # Kaguya dataset pair
+       if isinstance(reference, dict) and isinstance(target, dict):
+            reference_path = self._download_kaguya_image(reference)
+            target_path = self._download_kaguya_image(target)
+
+            reference_image = load_kaguya_img_gz(
+                reference_path,
+                lines=reference["lines"],
+                line_samples=reference["line_samples"],
+                sample_type=reference["sample_type"],
+                sample_bits=int(reference["sample_bits"]),
+                scaling_factor=reference["scaling_factor"],
+                offset=reference["offset"],
+            )
+
+            target_image = load_kaguya_img_gz(
+                target_path,
+                lines=target["lines"],
+                line_samples=target["line_samples"],
+                sample_type=target["sample_type"],
+                sample_bits=int(target["sample_bits"]),
+                scaling_factor=target["scaling_factor"],
+                offset=target["offset"],
+            )
+
+            return self.run(
+                reference_image,
+                target_image,
+                pair_metadata=pair,
+            )
+
+        # Legacy CSV workflow
+            ohrc_name = str(pair.get("ohrc", "reference"))
+            tmc_name = str(pair.get("tmc", "target"))
+
+            reference_image, target_image = self._generate_csv_pair_image(
+            pair_id,
+            ohrc_name,
+            tmc_name,
+            overlap_score,
+        )
+
+            return self.run(
+            reference_image,
+            target_image,
+            pair_metadata=pair,
+        )
 
     def run(self, reference_image, target_image, pair_metadata=None, matcher_name=None):
         start = time.time()
@@ -362,16 +550,48 @@ class LunarAlignPipeline:
         if len(spatial["points1"]) == 0:
             raise ValueError("No spatially valid matches were retained.")
 
-        transform = {
-            "translation_x": float(np.mean(spatial["points2"][:, 0] - spatial["points1"][:, 0])),
-            "translation_y": float(np.mean(spatial["points2"][:, 1] - spatial["points1"][:, 1])),
-            "method": "translation_estimate"
-        }
-        add_stage("alignment", "translation_estimate", "complete", "Estimated a coarse shift from the retained spatial correspondences.")
+        points1 = spatial["points1"].astype(np.float32)
+        points2 = spatial["points2"].astype(np.float32)
 
-        error = np.linalg.norm((spatial["points2"] - spatial["points1"]), axis=1)
-        rmse = float(np.sqrt(np.mean(error ** 2))) if len(error) > 0 else 0.0
-        inlier_ratio = float(np.clip((match.get("confidence", 0.5) * 0.7) + (spatial["coverage"] * 0.3), 0.0, 1.0))
+        homography, inlier_mask = cv2.findHomography(
+            points1,
+            points2,
+            cv2.USAC_MAGSAC,
+            5.0,
+        )
+
+        if homography is None or inlier_mask is None:
+            raise ValueError("MAGSAC++ could not estimate a valid homography.")
+
+        inlier_mask = inlier_mask.ravel().astype(bool)
+        inlier_points1 = points1[inlier_mask]
+        inlier_points2 = points2[inlier_mask]
+
+        if len(inlier_points1) < 4:
+            raise ValueError("MAGSAC++ retained fewer than 4 geometric inliers.")
+
+        projected = cv2.perspectiveTransform(
+            inlier_points1.reshape(-1, 1, 2),
+            homography,
+        ).reshape(-1, 2)
+
+        residuals = np.linalg.norm(projected - inlier_points2, axis=1)
+        rmse = float(np.sqrt(np.mean(residuals ** 2)))
+        inlier_ratio = float(np.mean(inlier_mask))
+
+        transform = {
+            "method": "homography_magsac",
+            "homography": homography.tolist(),
+            "inliers": int(np.sum(inlier_mask)),
+            "total_matches": int(len(points1)),
+        }
+
+        add_stage(
+            "alignment",
+            "MAGSAC++_homography",
+            "complete",
+            "Estimated a geometrically verified homography using MAGSAC++.",
+        )
         coverage = float(spatial["coverage"])
         runtime = time.time() - start
         results = {
@@ -410,11 +630,48 @@ class LunarAlignPipeline:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        ax[0].imshow(prepared["reference"], cmap="gray")
-        ax[0].set_title("Reference")
-        ax[1].imshow(prepared["target"], cmap="gray")
-        ax[1].set_title("Target")
+        fig, ax = plt.subplots(figsize=(14, 7))
+
+        reference = prepared["reference"]
+        target = prepared["target"]
+
+        target_offset = reference.shape[1]
+
+        combined = np.hstack([reference, target])
+
+        ax.imshow(combined, cmap="gray")
+        ax.axvline(target_offset, linewidth=2)
+
+        points1 = spatial["points1"]
+        points2 = spatial["points2"]
+
+        # Draw actual correspondence lines
+        for p1, p2 in zip(points1, points2):
+            ax.plot(
+                [p1[0], p2[0] + target_offset],
+                [p1[1], p2[1]],
+                linewidth=0.6,
+                alpha=0.7,
+            )
+
+        ax.scatter(
+            points1[:, 0],
+            points1[:, 1],
+            s=8,
+        )
+
+        ax.scatter(
+            points2[:, 0] + target_offset,
+            points2[:, 1],
+            s=8,
+        )
+
+        ax.set_title(
+            f"{matcher_name} matches — {len(points1)} correspondences"
+        )
+        ax.axis("off")
+
+        plt.tight_layout()
         plt.savefig(self.output_dir / "matches.png", dpi=150)
         plt.close(fig)
 

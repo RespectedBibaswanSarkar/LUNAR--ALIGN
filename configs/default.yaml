@@ -1,7 +1,7 @@
 dataset:
-  reference_csv: "kaguya_tc_stereo_catalog_lesssize.csv"
-  target_csv: "kaguya_tc_stereo_catalog_lesssize.csv"
-  max_pairs: 6
+  reference_csv: "data/kaguya_sample.csv"
+  target_csv: "data/kaguya_sample.csv"
+  max_pairs: 1
 
 matching:
   min_matches: 50
